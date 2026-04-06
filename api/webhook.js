@@ -69,21 +69,21 @@ const ALLOWED_IDS = [
 ];
 
 // ─── In-memory stores ─────────────────────────────────────────────────────────
-const userSettings = new Map(); // userId → settings object
-const userWaiting  = new Map(); // userId → 'window_title' | null
+const userSettings = new Map();
+const userWaiting  = new Map();
 
 function getSettings(userId) {
   return userSettings.get(userId) || {
     backgroundType: 'gradient',
     gradientIndex:  0,
-    solidColorIndex: 8,           // Đen
+    solidColorIndex: 8,
     aspectRatio:    'auto',
     padding:        48,
     borderRadius:   12,
     shadow:         'xl',
     showWindowBar:  false,
     windowTitle:    'Image',
-    settingsPage:   1,            // 1=nền+tỷlệ | 2=khung | 3=preset+cửasổ
+    settingsPage:   1,
   };
 }
 
@@ -158,47 +158,38 @@ async function processImage(buffer, settings) {
     : await sharp(buffer).png().toBuffer();
 
   const imgMeta = await sharp(imgBuf).metadata();
-  srcW = imgMeta.width; srcH = imgMeta.height;
+  srcW = imgMeta.width;
+  srcH = imgMeta.height;
 
-  // ── Compute inner canvas from aspect ratio ──
-  let innerW = srcW, innerH = srcH;
-  if (aspectRatio !== 'auto') {
-    const [rw, rh] = aspectRatio.split(':').map(Number);
-    const targetAspect = rw / rh;
-    const srcAspect = srcW / srcH;
-    if (srcAspect > targetAspect) {
-      innerW = srcW;
-      innerH = Math.round(srcW / targetAspect);
-    } else {
-      innerH = srcH;
-      innerW = Math.round(srcH * targetAspect);
-    }
-  }
+  // ── Inner frame = ảnh gốc, KHÔNG thay đổi theo aspect ratio ──
+  const innerW = srcW;
+  const innerH = srcH;
 
   // ── Window bar ──
   const barH = showWindowBar ? 36 : 0;
+  const contentW = innerW;
   const contentH = innerH + barH;
 
-  // ── Compose image onto inner canvas (centered) ──
-  const imgLeft = Math.round((innerW - srcW) / 2);
-  const imgTop  = barH + Math.round((innerH - srcH) / 2);
+  // ── Compose image onto inner canvas ──
+  const imgLeft = 0;
+  const imgTop  = barH;
 
   // Window bar SVG
   const winBarSvg = showWindowBar
     ? Buffer.from(
-        `<svg width="${innerW}" height="${barH}" xmlns="http://www.w3.org/2000/svg">
-          <rect width="${innerW}" height="${barH}" fill="#f5f5f5"/>
-          <rect x="0" y="${barH - 1}" width="${innerW}" height="1" fill="#e4e4e7"/>
+        `<svg width="${contentW}" height="${barH}" xmlns="http://www.w3.org/2000/svg">
+          <rect width="${contentW}" height="${barH}" fill="#f5f5f5"/>
+          <rect x="0" y="${barH - 1}" width="${contentW}" height="1" fill="#e4e4e7"/>
           <circle cx="16" cy="${barH / 2}" r="5.5" fill="#ff5f57"/>
           <circle cx="32" cy="${barH / 2}" r="5.5" fill="#febc2e"/>
           <circle cx="48" cy="${barH / 2}" r="5.5" fill="#28c840"/>
-          <text x="${innerW / 2}" y="${barH / 2 + 4}" text-anchor="middle"
+          <text x="${contentW / 2}" y="${barH / 2 + 4}" text-anchor="middle"
                 font-family="system-ui, sans-serif" font-size="11" fill="#71717a">${windowTitle}</text>
         </svg>`
       )
     : null;
 
-  // Background fill for inner canvas (white or transparent)
+  // Background fill for inner canvas
   const innerBg = backgroundType === 'none'
     ? { r: 0, g: 0, b: 0, alpha: 0 }
     : { r: 255, g: 255, b: 255, alpha: 1 };
@@ -208,13 +199,13 @@ async function processImage(buffer, settings) {
   composites.push({ input: imgBuf, top: imgTop, left: imgLeft });
 
   const framedContent = await sharp({
-    create: { width: innerW, height: contentH, channels: 4, background: innerBg },
+    create: { width: contentW, height: contentH, channels: 4, background: innerBg },
   }).composite(composites).png().toBuffer();
 
   // ── Rounded mask ──
   const maskSvg = Buffer.from(
-    `<svg width="${innerW}" height="${contentH}" xmlns="http://www.w3.org/2000/svg">
-      <rect width="${innerW}" height="${contentH}" rx="${borderRadius}" ry="${borderRadius}" fill="white"/>
+    `<svg width="${contentW}" height="${contentH}" xmlns="http://www.w3.org/2000/svg">
+      <rect width="${contentW}" height="${contentH}" rx="${borderRadius}" ry="${borderRadius}" fill="white"/>
     </svg>`
   );
 
@@ -222,9 +213,30 @@ async function processImage(buffer, settings) {
     .composite([{ input: maskSvg, blend: 'dest-in' }])
     .png().toBuffer();
 
-  // ── Canvas with padding ──
-  const canvasW = innerW + padding * 2;
-  const canvasH = contentH + padding * 2;
+  // ── Canvas size: nền thay đổi theo aspect ratio, ảnh giữ nguyên ──
+  const minCanvasW = contentW + padding * 2;
+  const minCanvasH = contentH + padding * 2;
+
+  let canvasW, canvasH;
+  if (aspectRatio === 'auto') {
+    canvasW = minCanvasW;
+    canvasH = minCanvasH;
+  } else {
+    const [rw, rh] = aspectRatio.split(':').map(Number);
+    const targetAspect = rw / rh;
+    const minAspect    = minCanvasW / minCanvasH;
+    if (minAspect > targetAspect) {
+      canvasW = minCanvasW;
+      canvasH = Math.max(Math.round(canvasW / targetAspect), minCanvasH);
+    } else {
+      canvasH = minCanvasH;
+      canvasW = Math.max(Math.round(canvasH * targetAspect), minCanvasW);
+    }
+  }
+
+  // Vị trí đặt ảnh frame vào chính giữa canvas
+  const frameLeft = Math.round((canvasW - contentW) / 2);
+  const frameTop  = Math.round((canvasH - contentH) / 2);
 
   // ── Background SVG ──
   let bgSvg;
@@ -244,13 +256,12 @@ async function processImage(buffer, settings) {
       <rect width="${canvasW}" height="${canvasH}" fill="${solidColor}"/>
     </svg>`;
   } else {
-    // none → transparent
     bgSvg = `<svg width="${canvasW}" height="${canvasH}" xmlns="http://www.w3.org/2000/svg">
       <rect width="${canvasW}" height="${canvasH}" fill="none"/>
     </svg>`;
   }
 
-  // ── Shadow ──
+  // ── Shadow + composite ──
   const compositesList = [];
 
   if (shadowCfg.blur > 0) {
@@ -263,8 +274,8 @@ async function processImage(buffer, settings) {
               values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 ${shadowCfg.opacity} 0"/>
           </filter>
         </defs>
-        <rect x="${padding}" y="${padding + shadowCfg.offset}"
-              width="${innerW}" height="${contentH}"
+        <rect x="${frameLeft}" y="${frameTop + shadowCfg.offset}"
+              width="${contentW}" height="${contentH}"
               rx="${borderRadius}" ry="${borderRadius}"
               fill="black" filter="url(#sh)"/>
       </svg>`
@@ -272,7 +283,7 @@ async function processImage(buffer, settings) {
     compositesList.push({ input: shadowSvg, blend: 'over' });
   }
 
-  compositesList.push({ input: roundedContent, left: padding, top: padding });
+  compositesList.push({ input: roundedContent, left: frameLeft, top: frameTop });
 
   const bgBuffer = backgroundType === 'none'
     ? await sharp({ create: { width: canvasW, height: canvasH, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } }).png().toBuffer()
@@ -316,7 +327,7 @@ function buildKeyboard(userId) {
         { text: solid.name, callback_data: 'noop'       },
         { text: 'Màu ▶',   callback_data: 'solid:next' },
       ],
-      [{ text: '─── Tỷ lệ khung hình ───', callback_data: 'noop' }],
+      [{ text: '─── Tỷ lệ khung nền ───', callback_data: 'noop' }],
       [
         { text: `${ck('auto', s.aspectRatio)}Tự động`,  callback_data: 'ar:auto' },
         { text: `${ck('1:1', s.aspectRatio)}1:1`,       callback_data: 'ar:1:1'  },
@@ -411,7 +422,7 @@ function settingsText(userId) {
   return `⚙️ <b>Cài đặt SnapFrame</b>
 
 🎨 Nền: ${bg}
-📐 Tỷ lệ: ${RATIO_LABELS[s.aspectRatio] || s.aspectRatio}
+📐 Tỷ lệ nền: ${RATIO_LABELS[s.aspectRatio] || s.aspectRatio}
 📏 Padding: ${s.padding}px · Bo góc: ${s.borderRadius}px
 🌑 Bóng: ${s.shadow.toUpperCase()}
 🪟 Cửa sổ: ${s.showWindowBar ? `BẬT — "${s.windowTitle}"` : 'TẮT'}
@@ -451,51 +462,40 @@ export default async function handler(req, res) {
 
     if (data === 'noop') return res.status(200).json({ ok: true });
 
-    // Background type
-    if (data === 'bg:gradient') setSettings(userId, { backgroundType: 'gradient' });
+    if (data === 'bg:gradient')      setSettings(userId, { backgroundType: 'gradient' });
     else if (data === 'bg:solid')    setSettings(userId, { backgroundType: 'solid' });
     else if (data === 'bg:none')     setSettings(userId, { backgroundType: 'none' });
 
-    // Gradient cycle
-    else if (data === 'grad:next') setSettings(userId, { gradientIndex: (s.gradientIndex + 1) % GRADIENTS.length });
-    else if (data === 'grad:prev') setSettings(userId, { gradientIndex: (s.gradientIndex - 1 + GRADIENTS.length) % GRADIENTS.length });
+    else if (data === 'grad:next')   setSettings(userId, { gradientIndex: (s.gradientIndex + 1) % GRADIENTS.length });
+    else if (data === 'grad:prev')   setSettings(userId, { gradientIndex: (s.gradientIndex - 1 + GRADIENTS.length) % GRADIENTS.length });
 
-    // Solid color cycle
-    else if (data === 'solid:next') setSettings(userId, { solidColorIndex: (s.solidColorIndex + 1) % SOLID_COLORS.length });
-    else if (data === 'solid:prev') setSettings(userId, { solidColorIndex: (s.solidColorIndex - 1 + SOLID_COLORS.length) % SOLID_COLORS.length });
+    else if (data === 'solid:next')  setSettings(userId, { solidColorIndex: (s.solidColorIndex + 1) % SOLID_COLORS.length });
+    else if (data === 'solid:prev')  setSettings(userId, { solidColorIndex: (s.solidColorIndex - 1 + SOLID_COLORS.length) % SOLID_COLORS.length });
 
-    // Aspect ratio
     else if (data.startsWith('ar:')) setSettings(userId, { aspectRatio: data.slice(3) });
 
-    // Padding
-    else if (data === 'pad:up')   setSettings(userId, { padding: Math.min(s.padding + 10, 120) });
-    else if (data === 'pad:down') setSettings(userId, { padding: Math.max(s.padding - 10, 10)  });
+    else if (data === 'pad:up')      setSettings(userId, { padding: Math.min(s.padding + 10, 120) });
+    else if (data === 'pad:down')    setSettings(userId, { padding: Math.max(s.padding - 10, 10)  });
 
-    // Border radius
-    else if (data === 'rad:up')   setSettings(userId, { borderRadius: Math.min(s.borderRadius + 4, 48) });
-    else if (data === 'rad:down') setSettings(userId, { borderRadius: Math.max(s.borderRadius - 4, 0)  });
+    else if (data === 'rad:up')      setSettings(userId, { borderRadius: Math.min(s.borderRadius + 4, 48) });
+    else if (data === 'rad:down')    setSettings(userId, { borderRadius: Math.max(s.borderRadius - 4, 0)  });
 
-    // Shadow
     else if (data.startsWith('sh:')) setSettings(userId, { shadow: data.slice(3) });
 
-    // Window bar
-    else if (data === 'win:toggle') setSettings(userId, { showWindowBar: !s.showWindowBar });
+    else if (data === 'win:toggle')  setSettings(userId, { showWindowBar: !s.showWindowBar });
     else if (data === 'win:settitle') {
       userWaiting.set(userId, 'window_title');
       await sendMessage(chatId, '✏️ Nhập tiêu đề cho cửa sổ (gửi 1 dòng văn bản):');
       return res.status(200).json({ ok: true });
     }
 
-    // Presets
     else if (data === 'preset:clean')   setSettings(userId, { ...PRESETS.clean });
     else if (data === 'preset:compact') setSettings(userId, { ...PRESETS.compact });
     else if (data === 'preset:present') setSettings(userId, { ...PRESETS.present });
     else if (data === 'preset:reset')   userSettings.delete(userId);
 
-    // Page navigation
     else if (data.startsWith('page:')) setSettings(userId, { settingsPage: Number(data.slice(5)) });
 
-    // Done
     else if (data === 'settings:close') {
       await callAPI('editMessageText', {
         chat_id: chatId, message_id: msgId,
@@ -505,7 +505,6 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
-    // Re-render settings message
     await callAPI('editMessageText', {
       chat_id:      chatId,
       message_id:   msgId,
@@ -544,7 +543,7 @@ export default async function handler(req, res) {
       `👋 Xin chào! Mình là <b>SnapFrame Bot</b> 🖼️\n\n` +
       `Gửi cho mình một ảnh bất kỳ, mình sẽ:\n` +
       `• 🎨 Thêm nền gradient / màu đặc / trong suốt\n` +
-      `• 📐 Đặt tỷ lệ khung hình (16:9, 1:1...)\n` +
+      `• 📐 Đặt tỷ lệ khung nền (16:9, 1:1...)\n` +
       `• ✂️ Bo tròn góc ảnh\n` +
       `• 🌑 Thêm đổ bóng đẹp\n` +
       `• 🪟 Giả lập thanh cửa sổ macOS\n\n` +
@@ -579,7 +578,8 @@ export default async function handler(req, res) {
       `• Gradient: 10 màu gradient đẹp\n` +
       `• Màu đặc: 18 màu tuỳ chọn\n` +
       `• Không nền: xuất PNG trong suốt\n` +
-      `• Tỷ lệ: Auto / 1:1 / 4:3 / 16:9 / 9:16 / 21:9\n\n` +
+      `• Tỷ lệ nền: Auto / 1:1 / 4:3 / 16:9 / 9:16 / 21:9\n` +
+      `  (ảnh gốc giữ nguyên, chỉ nền thay đổi tỷ lệ)\n\n` +
       `<b>Trang 2 — Khung hình</b>\n` +
       `• Padding: 10–120px\n` +
       `• Bo góc: 0–48px\n` +
@@ -594,7 +594,6 @@ export default async function handler(req, res) {
 
   // ── Photo or image document ──────────────────────────────────────────────────
   const isPhoto = message.photo || message.document?.mime_type?.startsWith('image/');
-  const isDownload = text === '/download';
 
   if (isPhoto) {
     await sendTyping(chatId);
@@ -616,7 +615,6 @@ export default async function handler(req, res) {
 
       const caption = `✨ <b>SnapFrame</b> — ${bgLabel} • ${s.padding}px • r${s.borderRadius} • ${s.shadow.toUpperCase()}`;
 
-      // Send both compressed photo and full PNG file
       await sendPhoto(chatId, processed, caption);
       await sendDocument(chatId, processed, '📥 File PNG chất lượng cao');
     } catch (err) {
